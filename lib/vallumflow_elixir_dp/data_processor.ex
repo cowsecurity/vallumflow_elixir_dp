@@ -98,7 +98,8 @@ defmodule VallumflowElixirDp.DataProcessor do
          } = message,
          state
        ) do
-    visualization_data = extract_visualization_data(dashboard_json)
+    processed_json = preprocess_dashboard_json(dashboard_json)
+    visualization_data = extract_visualization_data(processed_json)
 
     Logger.info("""
     Processed Message:
@@ -114,6 +115,33 @@ defmodule VallumflowElixirDp.DataProcessor do
   defp process_message(message, state) do
     Logger.warning("Message does not match expected structure: #{inspect(message)}")
     {:ok, :ack, state}
+  end
+
+  # Pre-process dashboard JSON before sending to extractor
+  defp preprocess_dashboard_json(dashboard_json) when is_list(dashboard_json) do
+    # Join all strings and parse as a single JSON object
+    case Enum.join(dashboard_json)
+         # Remove any new lines
+         |> String.replace("\r\n", "")
+         # Remove any extra whitespace
+         |> String.trim()
+         |> Jason.decode() do
+      {:ok, parsed_json} ->
+        parsed_json
+
+      {:error, error} ->
+        Logger.error("Failed to pre parse dashboard_json #{inspect(error)}")
+        %{}
+    end
+  end
+
+  # Handle where input is already a map
+  defp preprocess_dashboard_json(dashboard_json) when is_map(dashboard_json), do: dashboard_json
+
+  # Handle any other unexpected format
+  defp preprocess_dashboard_json(dashboard_json) do
+    Logger.error("Unexpected dashboard_json format: #{inspect(dashboard_json)}")
+    %{}
   end
 
   # Extract data suitable for visualization from any tool output
