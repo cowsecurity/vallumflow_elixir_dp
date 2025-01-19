@@ -95,18 +95,17 @@ defmodule VallumflowElixirDp.DataProcessor do
            "dashboard_json" => dashboard_json,
            "node_id" => node_id,
            "org_id" => org_id
-         } = message,
+         } = _message,
          state
        ) do
-    processed_json = preprocess_dashboard_json(dashboard_json)
-    visualization_data = extract_visualization_data(processed_json)
+    processed_data = preprocess_dashboard_json(dashboard_json)
 
     Logger.info("""
     Processed Message:
     Agent ID: #{agent_id}
     Node ID: #{node_id}
     Org ID: #{org_id}
-    Visualization Data: #{inspect(visualization_data)}
+    Processed Data: #{inspect(processed_data)}
     """)
 
     {:ok, :ack, state}
@@ -117,385 +116,612 @@ defmodule VallumflowElixirDp.DataProcessor do
     {:ok, :ack, state}
   end
 
-  # Pre-process dashboard JSON before sending to extractor
+  # Preprocess dashboard JSON before parsing
   defp preprocess_dashboard_json(dashboard_json) when is_list(dashboard_json) do
-    # Join all strings and parse as a single JSON object
     case Enum.join(dashboard_json)
-         # Remove any new lines
          |> String.replace("\r\n", "")
-         # Remove any extra whitespace
          |> String.trim()
          |> Jason.decode() do
       {:ok, parsed_json} ->
-        parsed_json
+        parse_security_data(parsed_json)
 
       {:error, error} ->
-        Logger.error("Failed to pre parse dashboard_json #{inspect(error)}")
+        Logger.error("Failed to parse dashboard_json: #{inspect(error)}")
         %{}
     end
   end
 
-  # Handle where input is already a map
-  defp preprocess_dashboard_json(dashboard_json) when is_map(dashboard_json), do: dashboard_json
+  defp preprocess_dashboard_json(dashboard_json) when is_map(dashboard_json) do
+    parse_security_data(dashboard_json)
+  end
 
-  # Handle any other unexpected format
-  defp preprocess_dashboard_json(dashboard_json) do
-    Logger.error("Unexpected dashboard_json format: #{inspect(dashboard_json)}")
+  defp preprocess_dashboard_json(data) do
+    Logger.error("Unexpected dashboard_json format: #{inspect(data)}")
     %{}
   end
 
-  # Extract data suitable for visualization from any tool output
-  defp extract_visualization_data(data) when is_map(data) do
-    # Start with basic metadata
-    metadata = extract_metadata(data)
+  # Main parser for security data
+  defp parse_security_data(data) when is_map(data) do
+    findings = extract_findings_from_structure(data)
 
-    # Extract various types of data that could be visualized
     %{
-      metadata: metadata,
-      metrics: extract_metrics(data),
-      counts: extract_counts(data),
-      categories: extract_categories(data),
-      trends: extract_trends(data),
-      status_distribution: extract_status_distribution(data),
-      severity_distribution: extract_severity_distribution(data),
-      temporal_data: extract_temporal_data(data)
+      "metadata" => extract_metadata(data),
+      "summary" => generate_summary(findings),
+      "findings" => findings,
+      "analysis" => analyze_findings(findings)
     }
   end
 
-  defp extract_visualization_data(data) when is_list(data) do
-    # Handle array data by processing each item
-    processed_items = Enum.map(data, &extract_visualization_data/1)
+  # Extract findings from any data structure
+  defp extract_findings_from_structure(data) do
+    cond do
+      has_results_array?(data) ->
+        get_results_array(data)
+        |> Enum.flat_map(&normalize_finding/1)
 
-    # Merge similar data points
-    merge_visualization_data(processed_items)
+      has_direct_findings?(data) ->
+        [normalize_finding(data)]
+
+      has_nested_findings?(data) ->
+        extract_nested_findings(data)
+
+      true ->
+        []
+    end
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&(map_size(&1) == 0))
   end
 
-  defp extract_visualization_data(data) do
-    Logger.warning("Unexpected data format for visualization: #{inspect(data)}")
-    %{raw_data: data}
+  # Pattern detection helpers
+  defp has_results_array?(data) do
+    result_keys = ["results", "findings", "matches", "vulnerabilities", "issues"]
+
+    Enum.any?(result_keys, fn key ->
+      case data[key] do
+        items when is_list(items) -> Enum.any?(items, &has_security_indicators?/1)
+        _ -> false
+      end
+    end)
   end
 
-  # Extract common metadata fields
-  defp extract_metadata(data) do
-    common_fields = [
+  defp get_results_array(data) do
+    result_keys = ["results", "findings", "matches", "vulnerabilities", "issues"]
+
+    Enum.find_value(result_keys, [], fn key ->
+      case data[key] do
+        items when is_list(items) ->
+          if Enum.any?(items, &has_security_indicators?/1), do: items, else: []
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp has_direct_findings?(data) when is_map(data), do: has_security_indicators?(data)
+  defp has_direct_findings?(_), do: false
+
+  defp has_nested_findings?(data) when is_map(data) do
+    Enum.any?(data, fn {_, v} ->
+      case v do
+        v when is_map(v) -> has_security_indicators?(v)
+        v when is_list(v) -> Enum.any?(v, &has_security_indicators?/1)
+        _ -> false
+      end
+    end)
+  end
+
+  defp has_nested_findings?(_), do: false
+
+  defp has_security_indicators?(data) when is_map(data) do
+    keys = Map.keys(data) |> Enum.map(&String.downcase/1)
+
+    values =
+      Map.values(data)
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&String.downcase/1)
+
+    security_indicators = [
+      "vulnerability",
+      "vuln",
+      "cve",
+      "finding",
+      "issue",
+      "alert",
+      "severity",
+      "priority",
+      "risk",
+      "impact",
+      "cwe",
+      "cvss",
+      "owasp",
+      "affected",
+      "remediation",
+      "solution"
+    ]
+
+    Enum.any?(security_indicators, fn indicator ->
+      Enum.any?(keys, &String.contains?(&1, indicator)) ||
+        Enum.any?(values, &String.contains?(&1, indicator))
+    end)
+  end
+
+  defp has_security_indicators?(_), do: false
+
+  # Extract nested findings recursively
+  defp extract_nested_findings(data) when is_map(data) do
+    direct_findings = if has_security_indicators?(data), do: [normalize_finding(data)], else: []
+
+    nested_findings =
+      Enum.flat_map(data, fn
+        {_, v} when is_map(v) -> extract_nested_findings(v)
+        {_, v} when is_list(v) -> Enum.flat_map(v, &extract_nested_findings/1)
+        _ -> []
+      end)
+
+    direct_findings ++ nested_findings
+  end
+
+  defp extract_nested_findings(data) when is_list(data) do
+    Enum.flat_map(data, &extract_nested_findings/1)
+  end
+
+  defp extract_nested_findings(_), do: []
+
+  # Normalize finding into standard format
+  defp normalize_finding(data) when is_map(data) do
+    finding =
+      %{
+        "id" => extract_id(data),
+        "name" => extract_name(data),
+        "description" => extract_description(data),
+        "severity" => extract_severity(data),
+        "location" => extract_location(data),
+        "metadata" => extract_finding_metadata(data),
+        "details" => extract_details(data)
+      }
+      |> add_if_found("cvss", extract_cvss(data))
+      |> add_if_found("affected_components", extract_affected_components(data))
+      |> add_if_found("remediation", extract_remediation(data))
+      |> add_if_found("references", extract_references(data))
+      |> clean_nil_values()
+
+    if finding["id"] || finding["name"] || finding["description"], do: finding, else: nil
+  end
+
+  defp normalize_finding(_), do: nil
+
+  # Extract various components
+  defp extract_metadata(data) when is_map(data) do
+    metadata_keys = [
       "version",
       "timestamp",
-      "tool_version",
-      "tool_name",
-      "scan_id",
-      "report_id",
+      "created",
+      "scanner",
+      "tool",
+      "source",
+      "target",
       "environment",
-      "source"
+      "host"
     ]
 
     data
-    |> Map.take(common_fields)
-    |> Enum.reject(fn {_, v} -> is_nil(v) end)
+    |> Enum.filter(fn {k, v} ->
+      Enum.any?(metadata_keys, &String.contains?(String.downcase(k), &1)) and
+        not is_nil(v)
+    end)
     |> Enum.into(%{})
   end
 
-  # Extract numeric metrics suitable for graphs
-  defp extract_metrics(data) do
-    data
-    |> Enum.filter(fn {_, v} -> is_number(v) end)
-    |> Enum.into(%{})
+  defp extract_metadata(_), do: %{}
+
+  defp extract_id(data) do
+    find_first_value(data, [
+      "id",
+      "vulnerabilityID",
+      "cve",
+      "check_id",
+      "rule_id",
+      "issue_id",
+      "finding_id",
+      "alert_id"
+    ])
   end
 
-  # Extract count data (usually integers)
-  defp extract_counts(data) do
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        is_list(value) ->
-          Map.put(acc, "#{key}_count", length(value))
-
-        is_map(value) and Map.has_key?(value, "count") ->
-          Map.put(acc, key, value["count"])
-
-        true ->
-          acc
-      end
-    end)
+  defp extract_name(data) do
+    find_first_value(data, [
+      "name",
+      "title",
+      "summary",
+      "alert",
+      "rule_name",
+      "vulnerability_name",
+      "issue_name"
+    ])
   end
 
-  # Extract category-based data
-  defp extract_categories(data) do
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        is_list(value) ->
-          categories = categorize_list_items(value)
-          if map_size(categories) > 0, do: Map.put(acc, key, categories), else: acc
-
-        is_map(value) ->
-          categories = categorize_map_items(value)
-          if map_size(categories) > 0, do: Map.put(acc, key, categories), else: acc
-
-        true ->
-          acc
-      end
-    end)
+  defp extract_description(data) do
+    find_first_value(data, [
+      "description",
+      "details",
+      "message",
+      "info",
+      "explanation",
+      "summary"
+    ])
   end
 
-  # Extract trend data (time-based or sequential)
-  defp extract_trends(data) do
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        is_list(value) and has_temporal_data?(value) ->
-          Map.put(acc, key, extract_temporal_sequence(value))
-
-        is_map(value) and has_trend_data?(value) ->
-          Map.put(acc, key, extract_trend_points(value))
-
-        true ->
-          acc
-      end
-    end)
+  defp extract_severity(data) do
+    severity = find_first_value(data, ["severity", "priority", "risk_level", "impact"])
+    normalize_severity_level(severity)
   end
 
-  defp extract_temporal_sequence(items) when is_list(items) do
-    items
-    |> Enum.map(fn item ->
-      timestamp = extract_timestamp(item)
-      value = extract_sequence_value(item)
+  defp normalize_severity_level(level) when is_binary(level) do
+    level = String.downcase(level)
 
-      %{
-        timestamp: timestamp,
-        value: value
-      }
-    end)
-    |> Enum.reject(fn %{timestamp: ts, value: v} -> is_nil(ts) or is_nil(v) end)
-    |> Enum.sort_by(fn %{timestamp: ts} -> ts end)
-  end
-
-  defp extract_trend_points(data) when is_map(data) do
-    trend_keys = ["trend", "history", "sequence", "timeline"]
-
-    case Enum.find(trend_keys, fn key -> Map.has_key?(data, key) end) do
-      nil ->
-        []
-
-      key ->
-        case data[key] do
-          points when is_list(points) ->
-            points
-            |> Enum.map(&normalize_trend_point/1)
-            |> Enum.reject(&is_nil/1)
-
-          _ ->
-            []
-        end
-    end
-  end
-
-  defp normalize_trend_point(point) when is_map(point) do
-    case {extract_timestamp(point), extract_point_value(point)} do
-      {nil, _} -> nil
-      {_, nil} -> nil
-      {timestamp, value} -> %{timestamp: timestamp, value: value}
-    end
-  end
-
-  defp normalize_trend_point(_), do: nil
-
-  defp extract_sequence_value(item) when is_map(item) do
-    value_keys = ["value", "count", "total", "amount", "score"]
-    Enum.find_value(value_keys, fn key -> item[key] end)
-  end
-
-  defp extract_sequence_value(item) when is_number(item), do: item
-  defp extract_sequence_value(_), do: nil
-
-  defp extract_point_value(point) when is_map(point) do
-    value_keys = ["value", "count", "measure", "score", "total"]
-    Enum.find_value(value_keys, fn key -> point[key] end)
-  end
-
-  defp extract_point_value(point) when is_number(point), do: point
-  defp extract_point_value(_), do: nil
-
-  # Extract status-based distributions
-  defp extract_status_distribution(data) do
-    status_fields = ["status", "state", "result", "outcome"]
-
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        key in status_fields and is_binary(value) ->
-          Map.update(
-            acc,
-            "status_distribution",
-            %{value => 1},
-            &Map.update(&1, value, 1, fn x -> x + 1 end)
-          )
-
-        is_list(value) ->
-          distribution = count_status_in_list(value)
-
-          if map_size(distribution) > 0,
-            do: Map.put(acc, "#{key}_status", distribution),
-            else: acc
-
-        true ->
-          acc
-      end
-    end)
-  end
-
-  # Extract severity-based distributions
-  defp extract_severity_distribution(data) do
-    severity_fields = ["severity", "priority", "risk_level", "impact"]
-
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        key in severity_fields and is_binary(value) ->
-          Map.update(
-            acc,
-            "severity_distribution",
-            %{value => 1},
-            &Map.update(&1, value, 1, fn x -> x + 1 end)
-          )
-
-        is_list(value) ->
-          distribution = count_severity_in_list(value)
-
-          if map_size(distribution) > 0,
-            do: Map.put(acc, "#{key}_severity", distribution),
-            else: acc
-
-        true ->
-          acc
-      end
-    end)
-  end
-
-  # Extract time-based data
-  defp extract_temporal_data(data) do
-    data
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      cond do
-        is_list(value) and has_temporal_data?(value) ->
-          Map.put(acc, key, group_by_time(value))
-
-        is_map(value) and has_timestamp_field?(value) ->
-          Map.put(acc, key, extract_temporal_point(value))
-
-        true ->
-          acc
-      end
-    end)
-  end
-
-  # Helper functions for data extraction
-  defp categorize_list_items(items) when is_list(items) do
-    items
-    |> Enum.reduce(%{}, fn item, acc ->
-      category = determine_category(item)
-      Map.update(acc, category, 1, &(&1 + 1))
-    end)
-  end
-
-  defp categorize_map_items(items) when is_map(items) do
-    items
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      Map.put(acc, key, categorize_value(value))
-    end)
-  end
-
-  defp determine_category(item) when is_map(item) do
     cond do
-      Map.has_key?(item, "type") -> item["type"]
-      Map.has_key?(item, "category") -> item["category"]
+      Enum.member?(["critical", "crit"], level) -> "critical"
+      Enum.member?(["high", "h"], level) -> "high"
+      Enum.member?(["medium", "med", "moderate", "m"], level) -> "medium"
+      Enum.member?(["low", "l"], level) -> "low"
+      Enum.member?(["negligible", "info", "information", "i"], level) -> "info"
       true -> "unknown"
     end
   end
 
-  defp determine_category(_), do: "unknown"
+  defp normalize_severity_level(_), do: "unknown"
 
-  defp categorize_value(value) when is_binary(value), do: value
-  defp categorize_value(value) when is_number(value), do: "numeric"
-  defp categorize_value(value) when is_boolean(value), do: "boolean"
-  defp categorize_value(value) when is_list(value), do: "array"
-  defp categorize_value(value) when is_map(value), do: "object"
-  defp categorize_value(_), do: "unknown"
+  defp extract_location(data) do
+    location =
+      %{}
+      |> add_if_found("file", find_first_value(data, ["file", "path", "filename"]))
+      |> add_if_found("line", find_first_value(data, ["line", "line_number", "lineno"]))
+      |> add_if_found("position", extract_position(data))
 
-  defp has_temporal_data?(items) when is_list(items) do
-    Enum.any?(items, &has_timestamp_field?/1)
+    if map_size(location) > 0, do: location, else: nil
   end
 
-  defp has_timestamp_field?(item) when is_map(item) do
-    Enum.any?(["timestamp", "date", "time", "created_at", "updated_at"], &Map.has_key?(item, &1))
+  defp extract_position(data) do
+    start_data = find_nested_value(data, ["start", "position", "location"])
+    end_data = find_nested_value(data, ["end", "position", "location"])
+
+    case {start_data, end_data} do
+      {nil, nil} ->
+        nil
+
+      {start, end_pos} ->
+        position =
+          %{}
+          |> maybe_add_position("start", start)
+          |> maybe_add_position("end", end_pos)
+
+        if map_size(position) > 0, do: position, else: nil
+    end
   end
 
-  defp has_timestamp_field?(_), do: false
+  defp extract_cvss(data) do
+    cvss_data = find_nested_value(data, ["cvss", "metrics", "score", "risk_score"])
 
-  defp has_trend_data?(data) when is_map(data) do
-    Enum.any?(["trend", "history", "sequence", "timeline"], &Map.has_key?(data, &1))
+    case cvss_data do
+      score when is_number(score) -> %{"score" => score}
+      map when is_map(map) -> clean_nil_values(map)
+      _ -> nil
+    end
   end
 
-  defp has_trend_data?(_), do: false
+  defp extract_finding_metadata(data) do
+    metadata_fields = [
+      "type",
+      "category",
+      "technology",
+      "confidence",
+      "cwe",
+      "owasp",
+      "impact",
+      "likelihood",
+      "tags",
+      "labels",
+      "source"
+    ]
 
-  defp count_status_in_list(items) when is_list(items) do
-    items
-    |> Enum.reduce(%{}, fn item, acc ->
-      status = extract_status(item)
-      if status, do: Map.update(acc, status, 1, &(&1 + 1)), else: acc
+    metadata =
+      Enum.reduce(metadata_fields, %{}, fn field, acc ->
+        case find_nested_value(data, [field]) do
+          nil -> acc
+          value -> Map.put(acc, field, value)
+        end
+      end)
+
+    if map_size(metadata) > 0, do: metadata, else: nil
+  end
+
+  defp extract_details(data) do
+    details =
+      %{}
+      |> add_if_found("technical", extract_technical_details(data))
+      |> add_if_found("security", extract_security_details(data))
+      |> add_if_found("context", extract_context_details(data))
+
+    if map_size(details) > 0, do: details, else: nil
+  end
+
+  defp extract_technical_details(data) do
+    fields = ["type", "category", "technology", "language", "confidence"]
+    extract_field_group(data, fields)
+  end
+
+  defp extract_security_details(data) do
+    fields = ["cwe", "owasp", "impact", "likelihood"]
+    extract_field_group(data, fields)
+  end
+
+  defp extract_context_details(data) do
+    fields = ["tags", "labels", "categories"]
+    extract_field_group(data, fields)
+  end
+
+  defp extract_field_group(data, fields) do
+    result =
+      Enum.reduce(fields, %{}, fn field, acc ->
+        case find_nested_value(data, [field]) do
+          nil -> acc
+          value -> Map.put(acc, field, value)
+        end
+      end)
+
+    if map_size(result) > 0, do: result, else: nil
+  end
+
+  defp extract_affected_components(data) do
+    components =
+      []
+      |> extract_packages(data)
+      |> extract_files(data)
+      |> extract_urls(data)
+
+    if length(components) > 0, do: components, else: nil
+  end
+
+  defp extract_packages(components, data) do
+    case find_nested_value(data, ["package", "packages", "module", "component"]) do
+      packages when is_list(packages) ->
+        packages
+        |> Enum.map(&normalize_component(&1, "package"))
+        |> Enum.reject(&is_nil/1)
+        |> Kernel.++(components)
+
+      package when is_map(package) ->
+        case normalize_component(package, "package") do
+          nil -> components
+          comp -> [comp | components]
+        end
+
+      _ ->
+        components
+    end
+  end
+
+  defp extract_files(components, data) do
+    case find_nested_value(data, ["file", "files", "path", "filepath"]) do
+      files when is_list(files) ->
+        files
+        |> Enum.map(&normalize_component(&1, "file"))
+        |> Enum.reject(&is_nil/1)
+        |> Kernel.++(components)
+
+      file when is_binary(file) ->
+        [%{"type" => "file", "path" => file} | components]
+
+      file when is_map(file) ->
+        case normalize_component(file, "file") do
+          nil -> components
+          comp -> [comp | components]
+        end
+
+      _ ->
+        components
+    end
+  end
+
+  defp extract_urls(components, data) do
+    case find_nested_value(data, ["url", "urls", "endpoint", "link"]) do
+      urls when is_list(urls) ->
+        urls
+        |> Enum.map(&normalize_component(&1, "url"))
+        |> Enum.reject(&is_nil/1)
+        |> Kernel.++(components)
+
+      url when is_binary(url) ->
+        [%{"type" => "url", "url" => url} | components]
+
+      url when is_map(url) ->
+        case normalize_component(url, "url") do
+          nil -> components
+          comp -> [comp | components]
+        end
+
+      _ ->
+        components
+    end
+  end
+
+  defp normalize_component(component, type) when is_map(component) do
+    base = %{"type" => type}
+
+    component
+    |> Enum.reduce(base, fn {k, v}, acc ->
+      if not is_nil(v), do: Map.put(acc, k, v), else: acc
+    end)
+    |> clean_nil_values()
+  end
+
+  defp normalize_component(component, type) when is_binary(component) do
+    case type do
+      "file" -> %{"type" => type, "path" => component}
+      "url" -> %{"type" => type, "url" => component}
+      "package" -> %{"type" => type, "name" => component}
+      _ -> nil
+    end
+  end
+
+  defp normalize_component(_, _), do: nil
+
+  defp extract_remediation(data) do
+    case find_nested_value(data, ["remediation", "fix", "solution", "recommendation"]) do
+      remedy when is_binary(remedy) ->
+        %{"description" => remedy}
+
+      remedy when is_map(remedy) ->
+        clean_nil_values(remedy)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp extract_references(data) do
+    case find_nested_value(data, ["references", "urls", "links", "see_also"]) do
+      refs when is_list(refs) ->
+        refs
+        |> Enum.map(fn
+          ref when is_binary(ref) -> ref
+          %{"url" => url} -> url
+          %{"href" => href} -> href
+          _ -> nil
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      _ ->
+        nil
+    end
+  end
+
+  # Generate summary of findings
+  defp generate_summary(findings) do
+    %{
+      "total_findings" => length(findings),
+      "severity_distribution" => count_by_key(findings, "severity"),
+      "component_distribution" => count_by_component_type(findings),
+      "remediation_available" => Enum.count(findings, & &1["remediation"]),
+      "findings_with_references" => Enum.count(findings, & &1["references"])
+    }
+  end
+
+  defp count_by_key(findings, key) do
+    findings
+    |> Enum.reduce(%{}, fn finding, acc ->
+      value = finding[key] || "unknown"
+      Map.update(acc, value, 1, &(&1 + 1))
     end)
   end
 
-  defp extract_status(item) when is_map(item) do
-    Enum.find_value(["status", "state", "result"], fn key -> item[key] end)
-  end
-
-  defp extract_status(_), do: nil
-
-  defp count_severity_in_list(items) when is_list(items) do
-    items
-    |> Enum.reduce(%{}, fn item, acc ->
-      severity = extract_severity(item)
-      if severity, do: Map.update(acc, severity, 1, &(&1 + 1)), else: acc
+  defp count_by_component_type(findings) do
+    findings
+    |> Enum.flat_map(&(get_in(&1, ["affected_components"]) || []))
+    |> Enum.reduce(%{}, fn comp, acc ->
+      type = comp["type"] || "unknown"
+      Map.update(acc, type, 1, &(&1 + 1))
     end)
   end
 
-  defp extract_severity(item) when is_map(item) do
-    Enum.find_value(["severity", "priority", "risk_level"], fn key -> item[key] end)
+  # Analyze findings
+  defp analyze_findings(findings) do
+    %{
+      "severity_analysis" => analyze_severity(findings),
+      "component_analysis" => analyze_components(findings),
+      "metadata_analysis" => analyze_metadata(findings)
+    }
   end
 
-  defp extract_severity(_), do: nil
+  defp analyze_severity(findings) do
+    severity_counts = count_by_key(findings, "severity")
+    total = length(findings)
 
-  defp group_by_time(items) when is_list(items) do
-    items
-    |> Enum.group_by(&extract_timestamp/1)
-    |> Enum.sort_by(fn {timestamp, _} -> timestamp end)
-    |> Enum.map(fn {timestamp, group} -> %{timestamp: timestamp, count: length(group)} end)
+    %{
+      "distribution" => severity_counts,
+      "high_critical_percentage" =>
+        percentage_of_total(
+          get_in(severity_counts, ["critical"]) || 0 + get_in(severity_counts, ["high"]) || 0,
+          total
+        )
+    }
   end
 
-  defp extract_timestamp(item) when is_map(item) do
-    Enum.find_value(["timestamp", "date", "created_at"], fn key -> item[key] end)
+  defp analyze_components(findings) do
+    components =
+      findings
+      |> Enum.flat_map(&(get_in(&1, ["affected_components"]) || []))
+
+    %{
+      "total_affected" => length(components),
+      "type_distribution" => count_by_key(components, "type"),
+      "unique_components" =>
+        components
+        |> Enum.uniq_by(&(&1["path"] || &1["name"] || &1["url"]))
+        |> length()
+    }
   end
 
-  defp extract_timestamp(_), do: nil
-
-  defp extract_temporal_point(data) when is_map(data) do
-    timestamp = extract_timestamp(data)
-    if timestamp, do: Map.put(data, "timestamp", timestamp), else: data
+  defp analyze_metadata(findings) do
+    findings
+    |> Enum.flat_map(&Map.to_list(&1["metadata"] || %{}))
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      Map.update(acc, key, [value], &[value | &1])
+    end)
+    |> Enum.map(fn {key, values} -> {key, Enum.frequencies(values)} end)
+    |> Enum.into(%{})
   end
 
-  defp merge_visualization_data(items) when is_list(items) do
-    Enum.reduce(items, %{}, fn item, acc ->
-      Map.merge(acc, item, fn _k, v1, v2 -> merge_values(v1, v2) end)
+  # Helper functions
+  defp percentage_of_total(count, total) when total > 0, do: count / total * 100
+  defp percentage_of_total(_, _), do: 0
+
+  defp maybe_add_position(map, _key, nil), do: map
+
+  defp maybe_add_position(map, key, position) when is_map(position) do
+    cleaned_position =
+      position
+      |> Enum.filter(fn {_, v} -> not is_nil(v) end)
+      |> Enum.into(%{})
+
+    if map_size(cleaned_position) > 0, do: Map.put(map, key, cleaned_position), else: map
+  end
+
+  defp maybe_add_position(map, _key, _position), do: map
+
+  defp add_if_found(map, _key, nil), do: map
+  defp add_if_found(map, _key, value) when map_size(value) == 0, do: map
+  defp add_if_found(map, key, value), do: Map.put(map, key, value)
+
+  defp find_nested_value(data, keys) when is_map(data) do
+    Enum.find_value(keys, fn search_key ->
+      Enum.find_value(data, fn {key, value} ->
+        if String.contains?(String.downcase(key), String.downcase(search_key)), do: value
+      end)
     end)
   end
 
-  defp merge_values(v1, v2) when is_map(v1) and is_map(v2) do
-    Map.merge(v1, v2, fn _k, v1, v2 -> merge_values(v1, v2) end)
+  defp find_nested_value(_, _), do: nil
+
+  defp find_first_value(data, keys) do
+    Enum.find_value(keys, fn key -> find_nested_value(data, [key]) end)
   end
 
-  defp merge_values(v1, v2) when is_list(v1) and is_list(v2), do: v1 ++ v2
-  defp merge_values(v1, v2) when is_number(v1) and is_number(v2), do: v1 + v2
-  defp merge_values(_, v2), do: v2
+  defp clean_nil_values(map) when is_map(map) do
+    map
+    |> Enum.reject(fn {_, v} -> is_nil(v) or (is_map(v) and map_size(v) == 0) end)
+    |> Enum.map(fn {k, v} ->
+      {k,
+       case v do
+         v when is_map(v) -> clean_nil_values(v)
+         v when is_list(v) -> Enum.map(v, &clean_nil_values/1)
+         _ -> v
+       end}
+    end)
+    |> Enum.into(%{})
+  end
+
+  defp clean_nil_values(value), do: value
 
   # GenServer callback implementations
   @impl true
