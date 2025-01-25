@@ -117,6 +117,17 @@ defmodule VallumflowElixirDp.DataProcessor do
   end
 
   # Preprocess dashboard JSON before parsing
+  defp preprocess_dashboard_json(dashboard_json) when is_binary(dashboard_json) do
+    case Jason.decode(dashboard_json) do
+      {:ok, parsed_json} ->
+        parse_security_data(parsed_json)
+
+      {:error, error} ->
+        Logger.error("Faield to parse binary dashboard_json: #{inspect(error)}")
+        %{}
+    end
+  end
+
   defp preprocess_dashboard_json(dashboard_json) when is_list(dashboard_json) do
     case Enum.join(dashboard_json)
          |> String.replace("\r\n", "")
@@ -168,8 +179,8 @@ defmodule VallumflowElixirDp.DataProcessor do
       true ->
         []
     end
+    # Only reject nil values
     |> Enum.reject(&is_nil/1)
-    |> Enum.reject(&(map_size(&1) == 0))
   end
 
   # Pattern detection helpers
@@ -218,8 +229,14 @@ defmodule VallumflowElixirDp.DataProcessor do
 
     values =
       Map.values(data)
-      |> Enum.map(&to_string/1)
-      |> Enum.map(&String.downcase/1)
+      |> Enum.map(fn
+        v when is_binary(v) -> String.downcase(v)
+        v when is_number(v) -> to_string(v)
+        v when is_list(v) -> ""
+        v when is_map(v) -> ""
+        nil -> ""
+        v -> inspect(v)
+      end)
 
     security_indicators = [
       "vulnerability",
@@ -596,31 +613,67 @@ defmodule VallumflowElixirDp.DataProcessor do
     end
   end
 
-  # Generate summary of findings
+  # Generate a summary of all findings
   defp generate_summary(findings) do
     %{
       "total_findings" => length(findings),
       "severity_distribution" => count_by_key(findings, "severity"),
       "component_distribution" => count_by_component_type(findings),
-      "remediation_available" => Enum.count(findings, & &1["remediation"]),
-      "findings_with_references" => Enum.count(findings, & &1["references"])
+      "remediation_available" =>
+        Enum.count(findings, fn
+          {key, _value} -> key == "remediation"
+          finding when is_map(finding) -> Map.has_key?(finding, "remediation")
+          _ -> false
+        end),
+      "findings_with_references" =>
+        Enum.count(findings, fn
+          {key, _value} -> key == "references"
+          finding when is_map(finding) -> Map.has_key?(finding, "references")
+          _ -> false
+        end)
     }
   end
 
   defp count_by_key(findings, key) do
     findings
     |> Enum.reduce(%{}, fn finding, acc ->
-      value = finding[key] || "unknown"
-      Map.update(acc, value, 1, &(&1 + 1))
+      case finding do
+        finding when is_map(finding) ->
+          value = finding[key] || "unknown"
+          Map.update(acc, value, 1, &(&1 + 1))
+
+        {^key, value} when is_list(value) ->
+          Enum.reduce(value, acc, fn item, inner_acc ->
+            Map.update(inner_acc, item["type"] || "unknown", 1, &(&1 + 1))
+          end)
+
+        _ ->
+          acc
+      end
     end)
   end
 
   defp count_by_component_type(findings) do
     findings
-    |> Enum.flat_map(&(get_in(&1, ["affected_components"]) || []))
-    |> Enum.reduce(%{}, fn comp, acc ->
-      type = comp["type"] || "unknown"
-      Map.update(acc, type, 1, &(&1 + 1))
+    # Ensure we have a list
+    |> List.wrap()
+    |> Enum.reduce(%{}, fn
+      {"affected_components", components}, acc when is_list(components) ->
+        # Handle tuple format
+        Enum.reduce(components, acc, fn comp, inner_acc ->
+          type = comp["type"] || "unknown"
+          Map.update(inner_acc, type, 1, &(&1 + 1))
+        end)
+
+      %{"affected_components" => components}, acc when is_list(components) ->
+        # Handle map format
+        Enum.reduce(components, acc, fn comp, inner_acc ->
+          type = comp["type"] || "unknown"
+          Map.update(inner_acc, type, 1, &(&1 + 1))
+        end)
+
+      _, acc ->
+        acc
     end)
   end
 
@@ -636,21 +689,22 @@ defmodule VallumflowElixirDp.DataProcessor do
   defp analyze_severity(findings) do
     severity_counts = count_by_key(findings, "severity")
     total = length(findings)
+    critical_count = Map.get(severity_counts, "critical", 0)
+    high_count = Map.get(severity_counts, "high", 0)
 
     %{
       "distribution" => severity_counts,
-      "high_critical_percentage" =>
-        percentage_of_total(
-          get_in(severity_counts, ["critical"]) || 0 + get_in(severity_counts, ["high"]) || 0,
-          total
-        )
+      "high_critical_percentage" => percentage_of_total(critical_count + high_count, total)
     }
   end
 
   defp analyze_components(findings) do
     components =
-      findings
-      |> Enum.flat_map(&(get_in(&1, ["affected_components"]) || []))
+      Enum.flat_map(findings, fn
+        {"affected_components", comps} when is_list(comps) -> comps
+        finding when is_map(finding) -> finding["affected_components"] || []
+        _ -> []
+      end)
 
     %{
       "total_affected" => length(components),
@@ -664,7 +718,12 @@ defmodule VallumflowElixirDp.DataProcessor do
 
   defp analyze_metadata(findings) do
     findings
-    |> Enum.flat_map(&Map.to_list(&1["metadata"] || %{}))
+    |> Enum.flat_map(fn
+      # Keep tuple data as key-value pairs
+      {key, value} -> [{key, value}]
+      finding when is_map(finding) -> Map.to_list(finding["metadata"] || %{})
+      _ -> []
+    end)
     |> Enum.reduce(%{}, fn {key, value}, acc ->
       Map.update(acc, key, [value], &[value | &1])
     end)
