@@ -24,7 +24,6 @@ vallumflow_elixir_dp-*.tar
 
 # Ignore env files
 .env
-.env.*
 
 # Ignore Mac files
 .DS_Store

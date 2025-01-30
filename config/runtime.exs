@@ -5,6 +5,8 @@ source!([".env"])
 
 # Get env variables
 mongodb_db = env!("MONGODB_DB")
+kafka_broker = env!("KAFKA_BROKER")
+kafka_port = env!("KAKFA_PORT")
 mongodb_collection = env!("MONGODB_COLLECTION")
 mongodb_username = env!("MONGODB_USERNAME")
 mongodb_password = env!("MONGODB_PASSWORD")
@@ -31,6 +33,25 @@ pool_size =
     _ -> 10
   end
 
+# Convert port to integer
+kafka_port_int =
+  try do
+    String.to_integer(kafka_port)
+  rescue
+    # Default Kafka port if conversion fails
+    _ -> 9092
+  end
+
+config :brod,
+  clients: [
+    brod_client_1: [
+      endpoints: [{kafka_broker, kafka_port_int}],
+      auto_start_producers: true,
+      default_producer_config: [],
+      reconnect_cool_down_seconds: 10
+    ]
+  ]
+
 config :vallumflow_elixir_dp,
   database: mongodb_db,
   collection: mongodb_collection,
@@ -38,7 +59,9 @@ config :vallumflow_elixir_dp,
   password: mongodb_password,
   mongo_uri: mongo_uri,
   check_interval: check_interval,
-  pool_size: pool_size
+  pool_size: pool_size,
+  kafka_broker: kafka_broker,
+  kafka_port: kafka_port_int
 
 config :logger, :console,
   format: {VallumflowElixirDp.JsonFormatter, :format},
