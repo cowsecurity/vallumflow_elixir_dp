@@ -101,4 +101,8 @@ The processor normalizes findings into:
   }
 }
 ```
+## License
 
+This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
+This software is copyleft. Any distributed modifications to this code must also be released under AGPL-3.0.
