@@ -40,6 +40,7 @@ defmodule VallumflowElixirDp.JsonFormatter do
   defp format_level(:warn), do: "WARN"
   defp format_level(:warning), do: "WARN"
   defp format_level(:error), do: "ERROR"
+  defp format_level(:critical), do: "CRITICAL"
 
   defp add_metadata(log_entry, metadata) do
     metadata
