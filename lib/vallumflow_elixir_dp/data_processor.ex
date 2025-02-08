@@ -168,7 +168,7 @@ defmodule VallumflowElixirDp.DataProcessor do
   end
 
   # Main parser for security data
-  defp parse_security_data(data) when is_map(data) do
+  defp parse_security_data(data) when is_map(data) or is_list(data) do
     findings = extract_findings_from_structure(data)
 
     %{
@@ -179,9 +179,23 @@ defmodule VallumflowElixirDp.DataProcessor do
     }
   end
 
+  defp parse_security_data(data) do
+    Logger.error("Unexpected data type for parsing_security_data: #{inspect(data)}")
+
+    %{
+      "metadata" => %{},
+      "summary" => %{},
+      "findings" => [],
+      "analysis" => %{}
+    }
+  end
+
   # Extract findings from any data structure
   defp extract_findings_from_structure(data) do
     cond do
+      is_list(data) ->
+        Enum.flat_map(data, &extract_findings_from_structure/1)
+
       has_results_array?(data) ->
         get_results_array(data)
         |> Enum.flat_map(&normalize_finding/1)
@@ -200,7 +214,7 @@ defmodule VallumflowElixirDp.DataProcessor do
   end
 
   # Pattern detection helpers
-  defp has_results_array?(data) do
+  defp has_results_array?(data) when is_map(data) do
     result_keys = ["results", "findings", "matches", "vulnerabilities", "issues"]
 
     Enum.any?(result_keys, fn key ->
@@ -210,6 +224,8 @@ defmodule VallumflowElixirDp.DataProcessor do
       end
     end)
   end
+
+  defp has_results_array?(_), do: false
 
   defp get_results_array(data) do
     result_keys = ["results", "findings", "matches", "vulnerabilities", "issues"]
@@ -226,6 +242,10 @@ defmodule VallumflowElixirDp.DataProcessor do
   end
 
   defp has_direct_findings?(data) when is_map(data), do: has_security_indicators?(data)
+
+  defp has_direct_findings?(data) when is_list(data),
+    do: Enum.any?(data, &has_security_indicators?/1)
+
   defp has_direct_findings?(_), do: false
 
   defp has_nested_findings?(data) when is_map(data) do
