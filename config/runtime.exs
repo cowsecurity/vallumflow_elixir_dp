@@ -64,6 +64,7 @@ config :vallumflow_elixir_dp,
   kafka_port: kafka_port_int
 
 config :logger, :console,
+  truncate: :infinity,
   format: {VallumflowElixirDp.JsonFormatter, :format},
   metadata: [
     module: nil,
